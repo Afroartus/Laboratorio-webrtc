@@ -1,0 +1,32 @@
+# Configuración del nodo LiveKit único del laboratorio.
+# Sin secretos: las claves llegan por LIVEKIT_KEYS y la IP anunciada por NODE_IP
+# (ambas desde compose.yaml a partir de infra/.env). No requiere Redis.
+
+port: 7880
+logging:
+  level: info
+  json: true
+
+rtc:
+  tcp_port: 7881
+  # UDP mux: un único puerto para ICE/UDP; no se usa rango RTP alternativo.
+  udp_port: 7882
+  # No descubrir IP pública con STUN externo: se anuncia NODE_IP (= LAB_HOST_IP).
+  use_external_ip: false
+
+room:
+  auto_create: true
+  # Límite predeterminado por si LiveKit recrea una sala automáticamente (paso 8).
+  max_participants: 2
+  empty_timeout: 600
+  departure_timeout: 20
+
+# TURN integrado: se habilita y valida en el paso 10.
+turn:
+  enabled: false
+#  domain: turn.webrtc.test
+#  udp_port: 3478
+#  tls_port: 5349
+
+# Webhooks hacia la API: se configuran en el paso 11
+# (url interna http://api:8080/api/v1/webhooks/livekit, api_key por LIVEKIT_WEBHOOK_API_KEY).

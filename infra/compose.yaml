@@ -1,0 +1,113 @@
+# Laboratorio WebRTC local con Podman.
+# Uso: podman compose --env-file infra/.env -f infra/compose.yaml <comando>
+# Proveedor: podman-compose 1.6.0 (ver docs/laboratorio.md).
+name: webrtc-lab
+
+x-database-url: &database-url postgres://${POSTGRES_USER:?falta POSTGRES_USER}:${POSTGRES_PASSWORD:?falta POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:?falta POSTGRES_DB}?sslmode=disable
+
+services:
+  postgres:
+    image: docker.io/library/postgres:18.6-alpine3.24
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_DB}
+    volumes:
+      - postgres_data:/var/lib/postgresql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U \"$$POSTGRES_USER\" -d \"$$POSTGRES_DB\""]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    networks: [backend]
+    # Sin puertos publicados: PostgreSQL no se expone al host ni a la LAN.
+
+  # Tarea de una sola ejecución: podman compose ... run --rm migrate
+  # Las migraciones SQL se crean en el paso 6.
+  migrate:
+    image: docker.io/migrate/migrate:v4.20.1
+    profiles: [tasks]
+    command: ["-path=/migrations", "-database", *database-url, "up"]
+    volumes:
+      - ../apps/api/migrations:/migrations:ro
+    depends_on:
+      postgres:
+        condition: service_healthy
+    networks: [backend]
+
+  api:
+    build:
+      context: ../apps/api
+      dockerfile: Containerfile
+    image: localhost/webrtc-lab/api:0.1.0
+    restart: unless-stopped
+    environment:
+      HTTP_ADDR: ":8080"
+      APP_BASE_URL: https://${WEB_DOMAIN:?falta WEB_DOMAIN}:8443
+      ALLOWED_WEB_ORIGINS: ${ALLOWED_WEB_ORIGINS:?falta ALLOWED_WEB_ORIGINS}
+      DATABASE_URL: *database-url
+      LIVEKIT_URL: wss://${RTC_DOMAIN:?falta RTC_DOMAIN}:8443
+      LIVEKIT_API_URL: http://livekit:7880
+      LIVEKIT_API_KEY: ${LIVEKIT_API_KEY:?falta LIVEKIT_API_KEY}
+      LIVEKIT_API_SECRET: ${LIVEKIT_API_SECRET:?falta LIVEKIT_API_SECRET}
+      LAB_HOST_IP: ${LAB_HOST_IP:?falta LAB_HOST_IP}
+      AUTH_MODE: ${AUTH_MODE:-local}
+      CALL_MAX_DURATION_SECONDS: ${CALL_MAX_DURATION_SECONDS:-3600}
+      JOIN_TOKEN_TTL_SECONDS: ${JOIN_TOKEN_TTL_SECONDS:-120}
+    healthcheck:
+      test: ["CMD", "/app/server", "-healthcheck"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+    depends_on:
+      postgres:
+        condition: service_healthy
+    networks: [backend, edge]
+    # Sin puertos publicados: solo accesible a través de Caddy.
+
+  livekit:
+    image: docker.io/livekit/livekit-server:v1.13.10
+    restart: unless-stopped
+    command: ["--config", "/etc/livekit/livekit.yaml"]
+    environment:
+      LIVEKIT_KEYS: "${LIVEKIT_API_KEY}: ${LIVEKIT_API_SECRET}"
+      # IP anunciada en los candidatos ICE: debe ser alcanzable por los navegadores.
+      NODE_IP: ${LAB_HOST_IP}
+    volumes:
+      - ./livekit.yaml:/etc/livekit/livekit.yaml:ro
+    ports:
+      - "${LAB_HOST_IP}:7881:7881/tcp"
+      - "${LAB_HOST_IP}:7882:7882/udp"
+    networks: [backend, edge]
+    # 7880 (señalización/API) no se publica: el navegador entra por Caddy y la API por la red interna.
+
+  web:
+    build:
+      context: ../apps/web
+      dockerfile: Containerfile
+    image: localhost/webrtc-lab/web:0.1.0
+    restart: unless-stopped
+    environment:
+      WEB_DOMAIN: ${WEB_DOMAIN}
+      RTC_DOMAIN: ${RTC_DOMAIN}
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    ports:
+      - "${LAB_HOST_IP}:8443:8443/tcp"
+    depends_on:
+      - api
+      - livekit
+    networks: [edge]
+
+networks:
+  backend:
+  edge:
+
+volumes:
+  postgres_data:
+  # Contiene la CA local de Caddy (clave privada incluida) y los certificados emitidos.
+  caddy_data:
+  caddy_config:

@@ -1,10 +1,12 @@
 # Spec técnico: aplicación sencilla de videollamadas WebRTC
 
-Versión: 1.1 · Fecha: 21 de octubre de 2026 · Estado: especificación para implementación y pruebas locales.
+Versión: 1.2 · Fecha: 21 de octubre de 2026 · Estado: especificación para implementación y pruebas locales.
 
 Documento base: `validación web RTC.md`. Esta revisión aplica las decisiones del usuario: empaquetado con Podman, backend Go, frontend Svelte y ejecución exclusiva en el laboratorio local. Sustituye la arquitectura de despliegue anterior y elimina la entrega de aplicaciones nativas.
 
 Las versiones, límites y valores operativos propuestos se validarán durante la implementación. Este documento no implica que la app esté construida ni que el entorno haya sido instalado.
+
+**Requisito de arquitectura:** backend Go y frontend Svelte deberán aplicar arquitectura hexagonal y Clean Architecture. El dominio y los casos de uso serán independientes de frameworks, transporte, persistencia y SDK multimedia. Las reglas de los pasos 3 y 4 son obligatorias para la implementación.
 
 ## Paso 1. Definir el alcance de la app web
 
@@ -32,7 +34,7 @@ Parámetros iniciales: dos identidades por llamada, duración máxima de 60 minu
 | Componente | Tecnología | Uso |
 | --- | --- | --- |
 | Frontend | Svelte + TypeScript + Vite | SPA con interfaz propia y compilación estática. |
-| SDK web | `livekit-client` | Señalización, pistas y eventos; integración directa desde Svelte. |
+| SDK web | `livekit-client` | Señalización, pistas y eventos, encapsulados en un adaptador del frontend. |
 | Backend | Go + `net/http` | API, autenticación local y gestión de llamadas. |
 | SDK de servidor | SDK oficial LiveKit para Go y paquete de autenticación del protocolo | Gestión administrativa de salas y firma de tokens. |
 | Persistencia | PostgreSQL + `pgx/v5` | Usuarios locales, sesiones, llamadas y auditoría. |
@@ -79,23 +81,105 @@ Las direcciones internas de contenedores sirven para comunicación entre servici
 
 **Resultado del paso:** servicios locales y rutas de negocio, señalización y medios claramente identificados.
 
+### 3.1. Reglas compartidas de arquitectura
+
+Clean Architecture define la separación de responsabilidades y la dirección de dependencias; la arquitectura hexagonal expresa entradas y salidas mediante puertos y adaptadores. Se implementará un núcleo por aplicación, dentro del único servicio Go y de la única SPA Svelte.
+
+| Capa | Responsabilidad | Dependencias permitidas |
+| --- | --- | --- |
+| Dominio | Entidades, valores, reglas e invariantes de negocio. | Tipos propios y utilidades estándar sin efectos externos. |
+| Aplicación | Casos de uso, coordinación y contratos de entrada/salida. | Dominio y puertos definidos en esta capa. |
+| Adaptadores de entrada | HTTP, webhooks, tareas programadas e interacción de usuario. | Contratos de aplicación y tecnología de entrada. |
+| Adaptadores de salida | Persistencia, API remota, SDK multimedia, dispositivos y seguridad técnica. | Puertos de aplicación y tecnología concreta. |
+| Composición | Construir dependencias, inyectarlas y gestionar su ciclo de vida. | Las capas necesarias para ensamblar la aplicación. |
+
+Reglas obligatorias:
+
+1. Las dependencias de código apuntan hacia el núcleo. Dominio y aplicación no importan adaptadores ni el punto de composición.
+2. Los casos de uso exponen puertos de entrada y consumen interfaces de salida. Inyectar implementaciones mediante constructores o funciones fábrica, sin localizador global de servicios.
+3. Traducir los datos en cada frontera: DTO HTTP, filas SQL, eventos LiveKit y modelos de pantalla no sustituyen a las entidades de dominio. Convertir errores técnicos en errores de aplicación y presentarlos desde los adaptadores de entrada.
+4. El backend conserva la autoridad sobre autorización y transiciones de llamadas. El frontend representa permisos y experiencia de usuario, sin reemplazar esas validaciones.
+5. Crear interfaces para dependencias externas y límites que se sustituyan en pruebas. Evitar repositorios genéricos, clases base e interfaces por entidad sin una necesidad concreta.
+6. Mantener las capas dentro de las aplicaciones existentes; no requieren microservicios, un contenedor por capa ni un framework de inyección de dependencias.
+
+### 3.2. Arquitectura del backend Go
+
+El dominio contiene `Call`, `CallMember`, roles, permisos y transiciones válidas. La aplicación implementa `Login`, `Logout`, `CreateCall`, `GetCall`, `IssueJoinToken`, `EndCall`, `HandleMediaEvent` y `ReconcileCalls`.
+
+| Tipo | Puertos / adaptadores propuestos |
+| --- | --- |
+| Entrada HTTP | Handlers `net/http`: decodifican, validan formato, obtienen la sesión e invocan casos de uso. |
+| Entrada de eventos | Webhook: verifica firma, traduce el evento e invoca `HandleMediaEvent`. |
+| Entrada programada | Trabajador local: invoca reconciliación y cierre; no modifica tablas directamente. |
+| Salida de datos | `UserRepository`, `SessionRepository`, `CallRepository`, `EventRepository` y `UnitOfWork`, implementados con PostgreSQL/pgx. |
+| Salida de medios | `RoomService` y `JoinTokenIssuer`, implementados con el SDK LiveKit de Go. |
+| Salida de seguridad y tiempo | `PasswordHasher`, `SessionTokenGenerator` y `Clock`, con implementaciones inyectadas. |
+
+Definir puertos de salida en `application/ports` con tipos propios; pueden aceptar `context.Context` para cancelación. No exponer `http.Request`, `pgx.Tx`, estructuras LiveKit ni códigos HTTP al núcleo. Las entidades de dominio no contienen etiquetas JSON o de persistencia para satisfacer a un adaptador.
+
+Los casos de uso definen qué operaciones son atómicas. `UnitOfWork` ejecuta la transacción y entrega repositorios vinculados a ella. Guardar `ENDING` y la tarea de cierre en la misma transacción; la llamada al servidor de medios queda fuera de esa transacción SQL y se coordina mediante la tarea persistida y reintentos idempotentes.
+
+`cmd/server` ensambla configuración, conexiones, adaptadores y casos de uso; registra handlers y gestiona apagado. Los handlers no contienen SQL, reglas de pertenencia ni llamadas directas al SDK. Flujo de ejemplo: handler de token → `IssueJoinToken` → repositorio y política de acceso → puertos de sala/firma → resultado de aplicación → DTO HTTP.
+
+### 3.3. Arquitectura del frontend Svelte
+
+El dominio del frontend contiene tipos propios de participante, permisos, estado de llamada y publicación. La aplicación implementa `SignIn`, `LoadCall`, `PrepareDevices`, `JoinCall`, `SetMicrophoneEnabled`, `SetCameraEnabled`, `StartScreenShare`, `StopScreenShare`, `LeaveCall` y `EndCall`.
+
+| Tipo | Puertos / adaptadores propuestos |
+| --- | --- |
+| Entrada de usuario | Componentes y controladores de presentación Svelte: invocan casos de uso y muestran resultados. |
+| Salida HTTP | `AuthGateway` y `CallGateway`, implementados con `fetch`; encapsulan cookies, CSRF, DTO y errores HTTP. |
+| Salida de medios | `MediaSession`, implementado con `livekit-client`; encapsula conexión, publicación, suscripción y traducción de eventos. |
+| Salida de dispositivos | `DeviceAccess`, implementado con APIs del navegador o utilidades del SDK para vista previa y selección. |
+| Presentación de estado | Presenter/store Svelte: transforma snapshots y eventos de aplicación en el modelo de pantalla. |
+
+Dominio y aplicación son TypeScript independiente: no importan Svelte, stores/runes, `livekit-client`, ni utilizan `fetch`, `window`, `document` o `navigator`. Sus contratos no exponen tipos DOM o del SDK. `MediaSession` entrega eventos propios como `ConnectionChanged`, `ParticipantUpdated` y `TrackStateChanged`, con identificadores y valores simples.
+
+Las pistas y elementos HTML permanecen en la capa externa. Un adaptador de renderizado vincula identificadores de pista con elementos de audio/video mediante componentes de presentación especializados. Se ensambla en la composición y no atraviesa el núcleo. Los componentes de pantalla no crean conexiones, consultan la API directamente ni llaman al SDK.
+
+La aplicación coordina el estado de sesión y el store Svelte lo refleja para la vista; no mantener dos máquinas de estados independientes. El adaptador multimedia posee la instancia del SDK y sus listeners. El caso de uso de salida dispone su limpieza y la vista retira sus suscripciones al desmontarse.
+
+Para compartir pantalla, conservar la activación del usuario: el clic invoca el caso de uso y este llama al puerto de captura inmediatamente, antes de cualquier espera de red o temporizador. Los permisos de aplicación ya deben estar disponibles. Las capas no deben romper el diálogo de captura del navegador.
+
+`src/composition` ensambla gateways HTTP, adaptadores de medios/dispositivos, casos de uso y presentación. Flujo: botón «Unirse» → `JoinCall` → `CallGateway` para autorización → `MediaSession` para conectar → eventos propios → presenter/store → vista. El backend conserva la decisión definitiva de acceso.
+
+**Criterio de arquitectura:** los casos de uso de ambas aplicaciones deben poder probarse con adaptadores falsos, sin iniciar PostgreSQL, LiveKit, el servidor HTTP ni una interfaz Svelte.
+
 ## Paso 4. Preparar el repositorio y el empaquetado Podman
 
-Estructura propuesta:
+Estructura de referencia para respetar los límites de arquitectura. Si el repositorio usa otra raíz, conservar esta separación y documentar la correspondencia:
 
 ```text
-apps/web/src/                 Componentes y estado Svelte
-apps/web/Containerfile        Compilación de la SPA y servicio Caddy
-apps/api/cmd/server/          Entrada del servicio Go
-apps/api/internal/            HTTP, autenticación, negocio, persistencia y LiveKit
-apps/api/migrations/          Migraciones SQL
-apps/api/Containerfile        Compilación y ejecución del binario Go
-infra/compose.yaml            Servicios, redes, volúmenes y puertos de Podman
-infra/Caddyfile               Web, API, WSS y TLS local
-infra/livekit.yaml            Configuración local del SFU y TURN
-infra/.env.example            Variables sin secretos
-tests/                       Pruebas de integración, web y laboratorio
-docs/laboratorio.md           Instalación, arranque, diagnóstico y parada
+apps/api/cmd/server/                       Composición y ciclo de vida del servicio Go
+apps/api/internal/domain/                  Entidades, valores y reglas
+apps/api/internal/application/ports/       Contratos de entrada y salida
+apps/api/internal/application/usecases/    Casos de uso
+apps/api/internal/adapters/in/http/        Handlers y DTO HTTP
+apps/api/internal/adapters/in/webhooks/    Validación y traducción de eventos
+apps/api/internal/adapters/in/jobs/        Activación de tareas periódicas
+apps/api/internal/adapters/out/postgres/   Repositorios y transacciones pgx
+apps/api/internal/adapters/out/livekit/    Salas y emisión de tokens
+apps/api/internal/adapters/out/security/   Hash y generación de credenciales
+apps/api/internal/adapters/out/clock/      Reloj del sistema
+apps/api/migrations/                       Migraciones SQL
+apps/api/Containerfile                     Compilación y ejecución de Go
+apps/web/src/domain/                       Modelos y reglas propias del frontend
+apps/web/src/application/ports/            Contratos de API, medios y dispositivos
+apps/web/src/application/usecases/         Casos de uso independientes de Svelte
+apps/web/src/adapters/http/                Gateways con fetch y traducción de DTO
+apps/web/src/adapters/livekit/             Sesión multimedia y traducción de eventos
+apps/web/src/adapters/browser/             Dispositivos y renderizado de pistas
+apps/web/src/presentation/                 Componentes, presenters y stores Svelte
+apps/web/src/composition/                  Ensamblado de dependencias del frontend
+apps/web/src/main.ts                       Arranque del punto de composición
+apps/web/Containerfile                     Compilación de la SPA y servicio Caddy
+infra/compose.yaml                         Servicios, redes, volúmenes y puertos Podman
+infra/Caddyfile                            Web, API, WSS y TLS local
+infra/livekit.yaml                         Configuración local del SFU y TURN
+infra/.env.example                         Variables sin secretos
+tests/                                    Integración, navegación y laboratorio
+docs/arquitectura.md                       Puertos, dependencias y decisiones
+docs/laboratorio.md                        Instalación, arranque, diagnóstico y parada
 ```
 
 Construir imágenes multietapa: Node solo compila la web; el servicio final sirve archivos estáticos. Go se compila en una etapa de construcción y se ejecuta como binario en una imagen mínima compatible. Incluir certificados raíz cuando el binario deba realizar conexiones TLS.
@@ -152,7 +236,7 @@ El servidor determina identidad, sala y permisos desde la sesión y los datos pe
 
 | Entidad | Campos mínimos |
 | --- | --- |
-| `users` | `id`, `username` único, `password_hash`, `display_name`, `active`, `created_at`. |
+| `users` | `id`, `username` único, `display_name`, `active`, `created_at`. |
 | `auth_sessions` | `id`, `user_id`, `session_token_hash` único, `csrf_secret`, `expires_at`, `revoked_at`. |
 | `calls` | `id` UUID, `room_name` único, `owner_id`, `status`, `created_at`, `join_deadline`, `started_at`, `ended_at`, `max_duration_seconds`, `version`. |
 | `call_members` | `call_id`, `user_id`, `role`, `allowed_sources`, `revoked_at`; unicidad por llamada/usuario. |
@@ -233,7 +317,7 @@ Para finalizar: guardar `ENDING`, denegar nuevos tokens y ejecutar `DeleteRoom` 
 
 ## Paso 9. Construir la interfaz propia
 
-Implementar en Svelte una pantalla de login y tres vistas de llamada: entrada, antesala y sala. Mantener una única instancia del SDK por llamada; registrar los eventos al montar la vista y retirar suscripciones y pistas al destruirla. Mantener el estado de conexión y medios en un módulo o store compartido. Mostrar el enlace de invitación al creador y distinguir claramente «Salir» de «Finalizar para todos».
+Implementar en la capa de presentación Svelte una pantalla de login y tres vistas de llamada: entrada, antesala y sala. Los componentes invocan casos de uso y consumen el presenter/store según el paso 3.3. Mantener una única instancia del SDK por llamada dentro del adaptador multimedia, con limpieza de pistas y suscripciones al salir. Mostrar el enlace de invitación al creador y distinguir claramente «Salir» de «Finalizar para todos».
 
 | Estado | Comportamiento esperado |
 | --- | --- |
@@ -246,7 +330,7 @@ Implementar en Svelte una pantalla de login y tres vistas de llamada: entrada, a
 | Red degradada / reconectando | Mensaje visible; reducir video antes de sacrificar audio cuando sea posible. |
 | Acceso rechazado / finalizada | Detener captura, liberar recursos y explicar la causa. |
 
-Usar las operaciones del SDK para habilitar cámara, micrófono y pantalla. Al apagar cámara, detener captura según la API seleccionada y comprobar que no se transmite video útil; ocultar el elemento visual no es suficiente. Al salir, desconectar, detener pistas de antesala/publicación y retirar listeners.
+Invocar los casos de uso de cámara, micrófono y pantalla; sus puertos delegan las operaciones técnicas al adaptador del SDK. Al apagar cámara, detener captura según la API seleccionada y comprobar que no se transmite video útil; ocultar el elemento visual no es suficiente. Al salir, desconectar, detener pistas de antesala/publicación y retirar listeners.
 
 Compartir pantalla debe partir de un clic y del selector del navegador. Cancelar ese selector no termina la llamada. Si el usuario deja de compartir desde el navegador, actualizar el botón y retirar la pista. No volver a compartir automáticamente después de una reconexión si se requiere un nuevo permiso. Fuente: [captura de pantalla en MDN](https://developer.mozilla.org/en-US/docs/Web/API/MediaDevices/getDisplayMedia).
 
@@ -321,6 +405,14 @@ Guardar un informe de resultados por ejecución. Un panel de monitorización per
 
 Ejecutar pruebas de autorización, sesiones, estados y concurrencia con las herramientas de Go; integración con PostgreSQL y LiveKit locales; y pruebas de interfaz con herramientas compatibles con Svelte. Complementar la automatización con cámara, micrófono y pantalla reales.
 
+Verificación obligatoria de arquitectura hexagonal y Clean Architecture:
+
+- Probar dominio y aplicación Go con repositorios, reloj y servicios de medios falsos; cubrir acceso rechazado, transición de cierre y reintento sin duplicar efectos.
+- Probar los casos de uso TypeScript sin navegador ni Svelte, con gateways y sesión multimedia falsos; cubrir fallo de autorización, reconexión, cancelación de pantalla y limpieza al salir.
+- Probar por separado los adaptadores reales: persistencia/transacciones, mapeo HTTP, firmas, traducción de eventos y vinculación de pistas con la vista.
+- Incorporar al comando de validación del proyecto una comprobación automática de dependencias: en Go, inspeccionar imports de paquetes; en TypeScript, aplicar restricciones de imports y resolución de alias. Rechazar dependencias del núcleo hacia adaptadores, frameworks o SDK y evitar accesos directos desde la presentación a HTTP/LiveKit.
+- Revisar que los puertos no filtren tipos SQL, HTTP, DOM o LiveKit al núcleo y que sustituir un adaptador falso por uno real solo cambie el ensamblado, no los casos de uso.
+
 Para caracterización opcional, medir 1, 5 y 10 llamadas simultáneas según el hardware disponible. Registrar CPU, RAM, resolución, bitrate, latencia y pérdida de paquetes; el generador de carga también consume recursos, por lo que conviene separarlo del servidor al medir capacidad. No extrapolar estas pruebas a 200 llamadas.
 
 Registrar tiempo hasta medios remotos y tiempo de recuperación. Como referencias iniciales de laboratorio, buscar menos de 5 segundos para conectar, excluyendo interacción con permisos, y menos de 15 segundos para recuperar después de restablecer la red. No son cifras garantizadas antes de medir.
@@ -364,7 +456,7 @@ podman compose --env-file infra/.env -f infra/compose.yaml down
 
 Estos comandos describen el flujo esperado: el archivo Compose, los Containerfiles y las tareas se crearán durante la implementación. No se presentan como archivos ya existentes. En Linux nativo se omiten los pasos de Podman Machine.
 
-Entregables: código Svelte y Go, Containerfiles, Compose compatible con Podman, configuración local, migraciones, inicialización de usuarios, OpenAPI, guía de laboratorio y reporte de pruebas. Documentar cómo confiar y retirar la CA de laboratorio, conservar/restaurar datos y diagnosticar medios bloqueados.
+Entregables: código Svelte y Go organizado con arquitectura hexagonal y Clean Architecture, Containerfiles, Compose compatible con Podman, configuración local, migraciones, inicialización de usuarios, OpenAPI, guía de laboratorio y reporte de pruebas. Incluir `docs/arquitectura.md` con capas, puertos, adaptadores, puntos de composición y reglas de dependencias de ambas aplicaciones, junto con los controles automáticos y sus resultados. Documentar cómo confiar y retirar la CA de laboratorio, conservar/restaurar datos y diagnosticar medios bloqueados.
 
 **Resultado del paso:** app web sencilla ejecutable y verificable íntegramente en el entorno local.
 
@@ -372,9 +464,11 @@ Entregables: código Svelte y Go, Containerfiles, Compose compatible con Podman,
 
 | Hito | Pasos | Evidencia |
 | --- | --- | --- |
-| Base local | 1–6 | Alcance, stack, Podman, usuarios y datos. |
+| Base local | 1–6 | Alcance, capas y puertos de ambas aplicaciones, stack, Podman, usuarios y datos. |
 | Llamada funcional | 7–9 | API Go e interfaz Svelte intercambian medios. |
 | Integración de red | 10–11 | HTTPS local, ICE/TURN y diagnóstico. |
 | Entrega del laboratorio | 12–13 | Pruebas en dos equipos LAN y arranque documentado. |
 
 La entrega estará terminada cuando otro desarrollador pueda levantar los servicios con Podman siguiendo la guía, autenticar dos usuarios locales y completar una videollamada con cámara, audio y pantalla compartida en la LAN. Deben quedar registrados los recursos del equipo, sistema operativo, modo de red Podman, versiones de navegador, resultados y limitaciones observadas. La instalación no debe depender de servicios externos para realizar la llamada.
+
+También deberán pasar las comprobaciones de dependencias y las pruebas aisladas de dominio/aplicación en backend y frontend. La existencia de carpetas con nombres de capas no basta: las reglas de dependencia, los puertos y el ensamblado descritos deben cumplirse en el código.
