@@ -400,3 +400,5 @@ infra/secrets/
 *.crt
 # Compilación de la SPA
 apps/web/dist/
+
+apps/api/cmd/contract-server/

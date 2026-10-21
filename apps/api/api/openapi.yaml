@@ -1,0 +1,562 @@
+openapi: 3.1.0
+info:
+  title: API del laboratorio WebRTC
+  version: 0.1.0
+  description: |
+    Contrato HTTP del backend Go (paso 7 del spec). Se sirve en el mismo origen
+    que la SPA, detrás de Caddy. Implementación: apps/api/internal/adapters/in/http.
+    TestOpenAPIInSync comprueba que las rutas y los códigos de error de este
+    documento coinciden con los registrados en Fiber.
+
+    Seguridad común:
+    - La sesión viaja en la cookie `__Host-webrtc_session` (HttpOnly, Secure,
+      SameSite=Lax). La identidad nunca se toma del cuerpo ni de la URL.
+    - Las mutaciones del navegador exigen un `Origin` exacto de la lista
+      permitida y, salvo login, el encabezado `X-CSRF-Token` obtenido en
+      `/auth/me` o en la respuesta de login.
+    - Todas las respuestas llevan `Cache-Control: no-store` y `X-Request-ID`.
+servers:
+  - url: https://webrtc.test:8443
+    description: Laboratorio (perfil de un equipo o LAN)
+
+tags:
+  - name: auth
+  - name: users
+  - name: calls
+  - name: webhooks
+  - name: health
+
+paths:
+  /api/v1/auth/login:
+    post:
+      tags: [auth]
+      operationId: login
+      summary: Inicia sesión con un usuario local.
+      description: |
+        Valida credenciales y establece la cookie de sesión. Protegido contra
+        login CSRF mediante `Origin` exacto y `Content-Type: application/json`.
+        Limitado por IP de cliente; el caso de uso puede limitar además por cuenta.
+      parameters:
+        - $ref: '#/components/parameters/Origin'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/LoginRequest'
+      responses:
+        '200':
+          description: Sesión creada.
+          headers:
+            Set-Cookie:
+              description: '`__Host-webrtc_session=<opaco>; Path=/; Expires=...; HttpOnly; Secure; SameSite=Lax`'
+              schema:
+                type: string
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SessionResponse'
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '415': { $ref: '#/components/responses/UnsupportedMediaType' }
+        '429': { $ref: '#/components/responses/TooManyRequests' }
+        '503': { $ref: '#/components/responses/ServiceUnavailable' }
+
+  /api/v1/auth/logout:
+    post:
+      tags: [auth]
+      operationId: logout
+      summary: Invalida la sesión y la cookie.
+      security:
+        - sessionCookie: []
+          csrfToken: []
+      parameters:
+        - $ref: '#/components/parameters/Origin'
+      responses:
+        '204':
+          description: Sesión revocada; la cookie se elimina (`Max-Age=0`).
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '503': { $ref: '#/components/responses/ServiceUnavailable' }
+
+  /api/v1/auth/me:
+    get:
+      tags: [auth]
+      operationId: getCurrentSession
+      summary: Usuario actual y token CSRF.
+      security:
+        - sessionCookie: []
+      responses:
+        '200':
+          description: Sesión vigente.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SessionResponse'
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '503': { $ref: '#/components/responses/ServiceUnavailable' }
+
+  /api/v1/users:
+    get:
+      tags: [users]
+      operationId: listUsers
+      summary: Usuarios locales activos que se pueden invitar.
+      description: No expone hashes, sesiones ni usuarios inactivos.
+      security:
+        - sessionCookie: []
+      responses:
+        '200':
+          description: Lista de usuarios.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/UsersResponse'
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '503': { $ref: '#/components/responses/ServiceUnavailable' }
+
+  /api/v1/calls:
+    post:
+      tags: [calls]
+      operationId: createCall
+      summary: Crea una llamada con el usuario actual como creador y un invitado.
+      description: |
+        Crea la llamada y sus dos miembros en una sola operación. Con
+        `Idempotency-Key`, repetir la misma solicitud devuelve la llamada
+        original (`Idempotent-Replayed: true`); reutilizar la clave con otro
+        cuerpo devuelve `409 IDEMPOTENCY_KEY_CONFLICT`.
+      security:
+        - sessionCookie: []
+          csrfToken: []
+      parameters:
+        - $ref: '#/components/parameters/Origin'
+        - name: Idempotency-Key
+          in: header
+          required: false
+          schema:
+            type: string
+            minLength: 1
+            maxLength: 255
+            pattern: '^[\x21-\x7E]+$'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateCallRequest'
+      responses:
+        '201':
+          description: Llamada creada (o recuperada por idempotencia).
+          headers:
+            Location:
+              schema:
+                type: string
+                example: /api/v1/calls/2f1c0a0e-6a52-4c39-8d0c-1f1b6c1c7d10
+            Idempotent-Replayed:
+              description: Presente con valor `true` si la respuesta procede de una solicitud anterior.
+              schema:
+                type: string
+                enum: ['true']
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CreateCallResponse'
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '409': { $ref: '#/components/responses/Conflict' }
+        '415': { $ref: '#/components/responses/UnsupportedMediaType' }
+        '503': { $ref: '#/components/responses/ServiceUnavailable' }
+
+  /api/v1/calls/{id}:
+    parameters:
+      - $ref: '#/components/parameters/CallId'
+    get:
+      tags: [calls]
+      operationId: getCall
+      summary: Estado de la llamada y permisos del usuario actual.
+      description: Solo miembros. Para cualquier otro usuario la llamada no existe (404).
+      security:
+        - sessionCookie: []
+      responses:
+        '200':
+          description: Llamada visible para el miembro.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CallResponse'
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '503': { $ref: '#/components/responses/ServiceUnavailable' }
+
+  /api/v1/calls/{id}/join-token:
+    parameters:
+      - $ref: '#/components/parameters/CallId'
+    post:
+      tags: [calls]
+      operationId: issueJoinToken
+      summary: Emite credenciales temporales para conectar con LiveKit.
+      description: |
+        Sin cuerpo: identidad, sala y permisos se derivan de la sesión y de los
+        datos persistidos. Revalida estado, pertenencia y permisos en cada
+        solicitud. Las credenciales no deben almacenarse fuera de la memoria
+        del navegador.
+      security:
+        - sessionCookie: []
+          csrfToken: []
+      parameters:
+        - $ref: '#/components/parameters/Origin'
+      responses:
+        '200':
+          description: Credenciales emitidas.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/JoinTokenResponse'
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/Conflict' }
+        '410': { $ref: '#/components/responses/Gone' }
+        '503': { $ref: '#/components/responses/ServiceUnavailable' }
+
+  /api/v1/calls/{id}/end:
+    parameters:
+      - $ref: '#/components/parameters/CallId'
+    post:
+      tags: [calls]
+      operationId: endCall
+      summary: Finaliza la llamada para todos.
+      description: |
+        Solo el creador. Repetible sin duplicar efectos: devuelve el estado
+        actual (`ENDING` mientras se cierra la sala, `ENDED` cuando terminó).
+      security:
+        - sessionCookie: []
+          csrfToken: []
+      parameters:
+        - $ref: '#/components/parameters/Origin'
+      responses:
+        '202':
+          description: Cierre aceptado.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/EndCallResponse'
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/Conflict' }
+        '503': { $ref: '#/components/responses/ServiceUnavailable' }
+
+  /api/v1/webhooks/livekit:
+    post:
+      tags: [webhooks]
+      operationId: receiveLiveKitWebhook
+      summary: Recibe un evento firmado de LiveKit.
+      description: |
+        Autenticado por la firma del proveedor en `Authorization`, calculada
+        sobre el cuerpo original. No usa cookie de usuario ni `Origin`.
+        Responde 204 solo después de persistir el evento.
+      security:
+        - liveKitWebhookSignature: []
+      requestBody:
+        required: true
+        content:
+          application/webhook+json:
+            schema:
+              type: object
+              description: WebhookEvent de LiveKit.
+      responses:
+        '204':
+          description: Evento verificado y persistido.
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '413': { $ref: '#/components/responses/PayloadTooLarge' }
+        '503': { $ref: '#/components/responses/ServiceUnavailable' }
+
+  /health/live:
+    get:
+      tags: [health]
+      operationId: live
+      summary: Sonda de vida del proceso.
+      responses:
+        '200':
+          description: El proceso responde.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HealthResponse'
+
+  /health/ready:
+    get:
+      tags: [health]
+      operationId: ready
+      summary: Sonda de preparación.
+      description: Comprueba las dependencias. Solo informa `up` o `down` por nombre; nunca detalles ni secretos.
+      responses:
+        '200':
+          description: Todas las dependencias disponibles.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HealthResponse'
+        '503':
+          description: Alguna dependencia no está disponible.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HealthResponse'
+
+components:
+  securitySchemes:
+    sessionCookie:
+      type: apiKey
+      in: cookie
+      name: __Host-webrtc_session
+    csrfToken:
+      type: apiKey
+      in: header
+      name: X-CSRF-Token
+    liveKitWebhookSignature:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT firmado por LiveKit con el hash del cuerpo
+
+  parameters:
+    Origin:
+      name: Origin
+      in: header
+      required: true
+      description: Origen exacto incluido en ALLOWED_WEB_ORIGINS. Lo envía el navegador.
+      schema:
+        type: string
+        example: https://webrtc.test:8443
+    CallId:
+      name: id
+      in: path
+      required: true
+      description: UUID canónico. Un valor mal formado responde 404.
+      schema:
+        type: string
+        format: uuid
+
+  responses:
+    BadRequest:
+      description: Solicitud mal formada o no válida.
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Error' }
+    Unauthorized:
+      description: Sesión inválida, credenciales incorrectas o firma inválida.
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Error' }
+    Forbidden:
+      description: Operación no permitida, origen no permitido o token CSRF inválido.
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Error' }
+    NotFound:
+      description: Llamada inexistente o no visible para el usuario.
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Error' }
+    Conflict:
+      description: Conflicto de estado o clave de idempotencia reutilizada.
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Error' }
+    Gone:
+      description: La llamada terminó para un miembro autorizado.
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Error' }
+    PayloadTooLarge:
+      description: El cuerpo supera el límite del servidor.
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Error' }
+    UnsupportedMediaType:
+      description: 'Se requiere `Content-Type: application/json`.'
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Error' }
+    TooManyRequests:
+      description: Límite de solicitudes superado.
+      headers:
+        Retry-After:
+          description: Segundos hasta que se reinicia la ventana (límite por IP).
+          schema:
+            type: integer
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Error' }
+    ServiceUnavailable:
+      description: Dependencia no disponible.
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Error' }
+
+  schemas:
+    ErrorCode:
+      type: string
+      enum:
+        - VALIDATION_ERROR
+        - INVALID_CREDENTIALS
+        - UNAUTHENTICATED
+        - FORBIDDEN
+        - ORIGIN_NOT_ALLOWED
+        - CSRF_TOKEN_INVALID
+        - NOT_FOUND
+        - CALL_NOT_FOUND
+        - METHOD_NOT_ALLOWED
+        - CALL_STATE_CONFLICT
+        - IDEMPOTENCY_KEY_CONFLICT
+        - CALL_ENDED
+        - PAYLOAD_TOO_LARGE
+        - UNSUPPORTED_MEDIA_TYPE
+        - TOO_MANY_REQUESTS
+        - INTERNAL_ERROR
+        - SERVICE_UNAVAILABLE
+
+    Error:
+      type: object
+      required: [code, message, requestId]
+      properties:
+        code: { $ref: '#/components/schemas/ErrorCode' }
+        message:
+          type: string
+          example: La llamada terminó
+        requestId:
+          type: string
+          description: Igual al encabezado X-Request-ID; útil para buscar en los logs.
+
+    LoginRequest:
+      type: object
+      additionalProperties: false
+      required: [username, password]
+      properties:
+        username:
+          type: string
+          minLength: 1
+          maxLength: 64
+        password:
+          type: string
+          minLength: 1
+          maxLength: 256
+          format: password
+
+    User:
+      type: object
+      required: [id, username, displayName]
+      properties:
+        id: { type: string }
+        username: { type: string }
+        displayName: { type: string }
+
+    SessionResponse:
+      type: object
+      required: [user, csrfToken, expiresAt]
+      properties:
+        user: { $ref: '#/components/schemas/User' }
+        csrfToken:
+          type: string
+          description: Enviar en `X-CSRF-Token` en cada mutación.
+        expiresAt:
+          type: string
+          format: date-time
+
+    UsersResponse:
+      type: object
+      required: [users]
+      properties:
+        users:
+          type: array
+          items: { $ref: '#/components/schemas/User' }
+
+    Role:
+      type: string
+      enum: [creator, participant, viewer]
+
+    CallStatus:
+      type: string
+      enum: [CREATED, ACTIVE, ENDING, ENDED, CANCELLED]
+
+    Permissions:
+      type: object
+      required: [publishCamera, publishMicrophone, publishScreen, subscribe]
+      properties:
+        publishCamera: { type: boolean }
+        publishMicrophone: { type: boolean }
+        publishScreen: { type: boolean }
+        subscribe: { type: boolean }
+
+    CreateCallRequest:
+      type: object
+      additionalProperties: false
+      required: [inviteeUserId, inviteeRole]
+      properties:
+        inviteeUserId:
+          type: string
+          minLength: 1
+          maxLength: 64
+        inviteeRole:
+          type: string
+          enum: [participant, viewer]
+
+    CreateCallResponse:
+      type: object
+      required: [callId, joinUrl, status]
+      properties:
+        callId: { type: string, format: uuid }
+        joinUrl:
+          type: string
+          format: uri
+          description: Enlace `/calls/{callId}` de la SPA; no incluye credenciales.
+          example: https://webrtc.test:8443/calls/2f1c0a0e-6a52-4c39-8d0c-1f1b6c1c7d10
+        status: { $ref: '#/components/schemas/CallStatus' }
+
+    CallResponse:
+      type: object
+      required: [callId, status, role, permissions, joinDeadline]
+      properties:
+        callId: { type: string, format: uuid }
+        status: { $ref: '#/components/schemas/CallStatus' }
+        role: { $ref: '#/components/schemas/Role' }
+        permissions: { $ref: '#/components/schemas/Permissions' }
+        joinDeadline: { type: string, format: date-time }
+
+    JoinTokenResponse:
+      type: object
+      required: [callId, roomName, serverUrl, participantToken, expiresAt, permissions]
+      properties:
+        callId: { type: string, format: uuid }
+        roomName:
+          type: string
+          example: call_2f1c0a0e-6a52-4c39-8d0c-1f1b6c1c7d10
+        serverUrl:
+          type: string
+          example: wss://rtc.webrtc.test:8443
+        participantToken:
+          type: string
+          description: JWT temporal de LiveKit restringido a la sala y a las fuentes permitidas.
+        expiresAt: { type: string, format: date-time }
+        permissions: { $ref: '#/components/schemas/Permissions' }
+
+    EndCallResponse:
+      type: object
+      required: [status]
+      properties:
+        status: { $ref: '#/components/schemas/CallStatus' }
+
+    HealthResponse:
+      type: object
+      required: [status]
+      properties:
+        status:
+          type: string
+          enum: [ok, ready, not_ready]
+        checks:
+          type: object
+          additionalProperties:
+            type: string
+            enum: [up, down]
