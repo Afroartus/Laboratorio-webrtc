@@ -1,11 +1,9 @@
-import { mount } from 'svelte'
-import App from '../presentation/App.svelte'
-
 /**
- * Punto de composición del frontend: aquí se ensamblarán gateways HTTP,
- * adaptadores de medios/dispositivos, casos de uso y presenters, y se
- * entregarán a la presentación. Ninguna otra capa construye dependencias.
+ * Único punto que construye la aplicación.
+ * Siempre monta el perfil simulado: ni `vite dev` ni la build abren la API ni LiveKit.
+ * Los adaptadores HTTP y LiveKit siguen en el repositorio, sin que este ensamblado los importe.
  */
-export function bootstrap(target: HTMLElement) {
-  return mount(App, { target })
+export async function bootstrap(target: HTMLElement): Promise<void> {
+  const { mountDevApp } = await import('./dev/mount-dev.ts')
+  mountDevApp(target)
 }

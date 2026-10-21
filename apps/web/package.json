@@ -10,7 +10,8 @@
     "dev": "vite",
     "build": "vite build",
     "preview": "vite preview",
-    "check": "svelte-check --tsconfig ./tsconfig.app.json && tsc -p tsconfig.node.json"
+    "test": "node --experimental-strip-types --test src/application/usecases/session.test.ts src/adapters/http/http-gateways.test.ts src/adapters/livekit/stats.test.ts src/presentation/router.test.ts",
+    "check": "svelte-check --tsconfig ./tsconfig.app.json && tsc -p tsconfig.node.json && tsc -p tsconfig.tests.json && node scripts/check-imports.mjs"
   },
   "devDependencies": {
     "@sveltejs/vite-plugin-svelte": "7.3.1",
@@ -20,5 +21,8 @@
     "svelte-check": "4.7.7",
     "typescript": "6.0.3",
     "vite": "8.3.5"
+  },
+  "dependencies": {
+    "livekit-client": "2.23.0"
   }
 }

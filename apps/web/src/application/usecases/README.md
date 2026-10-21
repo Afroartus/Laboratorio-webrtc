@@ -1,4 +1,5 @@
 # application/usecases
 
-`SignIn`, `LoadCall`, `PrepareDevices`, `JoinCall`, `SetMicrophoneEnabled`, `SetCameraEnabled`,
-`StartScreenShare`, `StopScreenShare`, `LeaveCall`, `EndCall`. Dependen solo de `domain` y `ports`.
+`SignIn`, `LoadSession`, `SignOut`, `ListUsers`, `CreateCall`, `LoadCall`, `PrepareDevices`,
+`JoinCall`, `SetMicrophoneEnabled`, `SetCameraEnabled`, `StartScreenShare`, `StopScreenShare`,
+`LeaveCall`, `EndCall`. Viven en `LabSession`: una sola máquina de estados. Dependen solo de `domain` y `ports`.
