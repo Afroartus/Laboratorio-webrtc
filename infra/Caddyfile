@@ -1,18 +1,13 @@
-# Caddy del laboratorio: SPA, proxy /api y señalización WSS de LiveKit con TLS local.
-# WEB_DOMAIN y RTC_DOMAIN llegan como variables de entorno desde compose.yaml.
 {
-	# Puerto HTTPS dentro del contenedor; compose lo publica en LAB_HOST_IP:8443.
 	https_port 8443
-	# Sin redirección HTTP->HTTPS: el laboratorio solo publica 8443.
 	auto_https disable_redirects
-	# CA interna de Caddy (volumen caddy_data). Su raíz pública se instala a mano en los clientes.
 	local_certs
 	skip_install_trust
 }
 
 (security_headers) {
 	header {
-		Strict-Transport-Security "max-age=31536000"
+		Strict-Transport-Security "max-age=300"
 		X-Content-Type-Options "nosniff"
 		Referrer-Policy "no-referrer"
 		-Server
@@ -23,6 +18,16 @@
 	tls internal
 	import security_headers
 	encode zstd gzip
+
+	header {
+		Content-Security-Policy "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data: blob:; media-src 'self' blob:; connect-src 'self' https://{$RTC_DOMAIN}:8443 wss://{$RTC_DOMAIN}:8443; frame-ancestors 'none'; base-uri 'none'; form-action 'self'"
+		Permissions-Policy "camera=(self), microphone=(self)"
+	}
+
+	@webhook path /api/v1/webhooks/*
+	handle @webhook {
+		respond "No encontrado" 404
+	}
 
 	handle /api/* {
 		reverse_proxy api:8080
@@ -39,6 +44,14 @@
 	tls internal
 	import security_headers
 
-	# Señalización y API HTTP de LiveKit. Los medios no pasan por aquí (7881/tcp, 7882/udp).
-	reverse_proxy livekit:7880
+	@signal {
+		path /rtc /rtc/*
+		header Origin https://{$WEB_DOMAIN}:8443
+	}
+	handle @signal {
+		reverse_proxy livekit:7880
+	}
+	handle {
+		respond "No encontrado" 404
+	}
 }
