@@ -37,17 +37,17 @@ func loadConfig(getenv func(string) string) (config, error) {
 	var cfg config
 	var errs []error
 
+	
+	//correcion error eliminar comentario despues del mergue
 	required := func(name string) string {
-		
+		v := strings.TrimSpace(getenv(name))
+		if v == "" {
+			errs = append(errs, fmt.Errorf("%s es obligatoria", name))
+		}
 		return v
 	}
 
-	v := strings.TrimSpace(getenv(name))
-	if v == "" {
-		errs = append(errs, fmt.Errorf("%s es obligatoria", name))
 
-		return v
-	}
 
 
 	parseURL := func(name string, schemes ...string) *url.URL {
@@ -62,7 +62,6 @@ func loadConfig(getenv func(string) string) (config, error) {
 		}
 		return u
 	}
-
 	positiveSeconds := func(name string) time.Duration {
 		raw := required(name)
 		if raw == "" {
