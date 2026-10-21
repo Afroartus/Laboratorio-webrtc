@@ -5,7 +5,6 @@ package main
 
 import (
 	"context"
-	"errors"
 	"flag"
 	"fmt"
 	"log/slog"
@@ -15,6 +14,8 @@ import (
 	"os/signal"
 	"syscall"
 	"time"
+
+	"github.com/gofiber/fiber/v3"
 
 	httpadapter "webrtc/api/internal/adapters/in/http"
 )
@@ -47,15 +48,13 @@ func main() {
 }
 
 func run(ctx context.Context, cfg config, logger *slog.Logger) error {
-	mux := http.NewServeMux()
-	httpadapter.RegisterHealth(mux)
-
-	srv := &http.Server{
-		Addr:              cfg.HTTPAddr,
-		Handler:           mux,
-		ReadHeaderTimeout: 5 * time.Second,
-		ErrorLog:          slog.NewLogLogger(logger.Handler(), slog.LevelError),
-	}
+	app := httpadapter.NewApp(logger)
+	// Las comprobaciones de PostgreSQL y LiveKit se añaden al ensamblar sus
+	// adaptadores de salida.
+	httpadapter.RegisterHealth(app, logger)
+	// httpadapter.RegisterAPI se ensambla cuando existan los casos de uso que
+	// implementan ports.Auth, ports.Users y ports.Calls, y el receptor de
+	// webhooks (pasos 5, 6, 8 y 11).
 
 	serveErr := make(chan error, 1)
 	go func() {
@@ -65,7 +64,7 @@ func run(ctx context.Context, cfg config, logger *slog.Logger) error {
 			"livekit_url", cfg.LiveKitURL.String(),
 			"auth_mode", cfg.AuthMode,
 		)
-		serveErr <- srv.ListenAndServe()
+		serveErr <- app.Listen(cfg.HTTPAddr, fiber.ListenConfig{DisableStartupMessage: true})
 	}()
 
 	select {
@@ -77,10 +76,10 @@ func run(ctx context.Context, cfg config, logger *slog.Logger) error {
 	logger.Info("apagado ordenado iniciado")
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), shutdownTimeout)
 	defer cancel()
-	if err := srv.Shutdown(shutdownCtx); err != nil {
+	if err := app.ShutdownWithContext(shutdownCtx); err != nil {
 		return fmt.Errorf("apagado del servidor HTTP: %w", err)
 	}
-	if err := <-serveErr; !errors.Is(err, http.ErrServerClosed) {
+	if err := <-serveErr; err != nil {
 		return err
 	}
 	logger.Info("apagado completado")
