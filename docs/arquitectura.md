@@ -1,6 +1,10 @@
 # Arquitectura del laboratorio WebRTC
 
+<<<<<<< HEAD
 Estado: pasos 4 y 7 del spec. Las capas existen y sus reglas están fijadas; el contrato HTTP (puertos de entrada, adaptador Fiber y OpenAPI) está implementado. Los casos de uso y los adaptadores de salida se implementan en los pasos 5, 6, 8 y 11.
+=======
+Estado: paso 6 del spec (modelo de datos y ciclo de vida). Las capas existen y sus reglas están fijadas; el esquema SQL, el dominio de llamadas, los casos de uso del ciclo de vida y el proceso periódico están implementados. El login, los contratos HTTP y el resto de adaptadores llegan en los pasos 5, 7–11.
+>>>>>>> paso-seis-modelo-datos
 
 ## Correspondencia con la estructura del spec
 
@@ -10,8 +14,14 @@ El repositorio usa exactamente la raíz de referencia del paso 4, con estas prec
 | --- | --- |
 | `apps/api/go.mod` | Módulo `webrtc/api`. Sustituye al `go.mod` inicial de la raíz y a `src/app/main.go`. |
 | `apps/api/cmd/server/config.go` | Carga y validación del contrato de variables; pertenece a la composición. |
+<<<<<<< HEAD
 | `apps/api/internal/adapters/in/http/` | Paquete `httpadapter` (el nombre `http` ocultaría `net/http`). Handlers con Fiber v3. |
 | `apps/api/api/openapi.yaml` | Contrato OpenAPI 3.1 de la API (paso 7). |
+=======
+| `apps/api/internal/adapters/in/http/` | Paquete `httpadapter` (el nombre `http` ocultaría `net/http`). |
+| `apps/api/internal/adapters/in/jobs/` | Worker periódico: reconciliación y trabajos pendientes del outbox. |
+| `apps/api/migrations/` | Migraciones SQL (`000001_init.up.sql` / `.down.sql`). |
+>>>>>>> paso-seis-modelo-datos
 | `apps/web/src/composition/bootstrap.ts` | Ensamblado del frontend; `main.ts` solo lo invoca. |
 
 ## Capas y dependencias permitidas
@@ -49,9 +59,48 @@ Prohibido en el núcleo (dominio + aplicación):
 
 Cada paquete Go de capa documenta su regla en `doc.go`; cada carpeta del frontend, en su `README.md`.
 
+## Modelo de datos (paso 6)
+
+El esquema vive en `apps/api/migrations/000001_init.up.sql` y se aplica con la tarea `migrate` de Compose. Tablas:
+
+| Tabla | Contenido |
+| --- | --- |
+| `users` | Directorio local: nombre de usuario único, hash de contraseña, estado. |
+| `auth_sessions` | Sesiones: solo el hash del identificador opaco, caducidad y revocación. |
+| `calls` | Llamada: sala única, propietario, estado, plazo de ingreso, duración máxima y versión para bloqueo optimista. |
+| `call_members` | Pertenencia: rol (`creator`, `participant`, `viewer`) y fuentes que puede publicar. |
+| `call_sessions` | Conexiones de participantes: `participant_sid`, `room_sid`, entrada y salida. |
+| `call_events` | Auditoría: tipo de evento, actor, instante y detalles en `jsonb`. |
+| `outbox_jobs` | Efectos externos pendientes (por ahora `delete_room`) con intentos, próximo intento y último error. |
+
+Convenciones: fechas en `timestamptz` (la conexión fija `timezone=UTC`), identificadores `uuid` generados por PostgreSQL, estados de llamada restringidos por `CHECK` y un único trabajo pendiente por llamada y operación mediante índice único parcial.
+
+### Ciclo de vida
+
+```text
+CREATED ──▶ ACTIVE ──▶ ENDING ──▶ ENDED
+   │                     ▲
+   ├──▶ CANCELLED        │
+   └──▶ ENDING ──────────┘
+```
+
+- `CREATED → ACTIVE`: el primer participante conecta con los medios.
+- `ACTIVE → ENDING`: el creador termina la llamada o vence la duración máxima.
+- `ENDING → ENDED`: el trabajo pendiente elimina la sala en el servidor de medios.
+- `CREATED → CANCELLED`: vence el plazo de ingreso y nadie se une.
+- `ENDED` y `CANCELLED` son terminales: una transición inválida es un error, no un reinicio.
+
+### Proceso periódico
+
+`internal/adapters/in/jobs` ejecuta cada `WORKER_INTERVAL_SECONDS` dos tareas: `reconcile-calls` (compara el estado persistido con el del servidor de medios y aplica las transiciones pendientes) y `process-outbox` (reclama los trabajos vencidos con `FOR UPDATE SKIP LOCKED`, llama al servidor de medios **fuera** de la transacción y actualiza el estado dentro de una transacción). Los reintentos usan un backoff exponencial acotado (`domain.Backoff`) y, al agotar `OUTBOX_MAX_ATTEMPTS`, el trabajo se abandona conservando el error.
+
 ## Puntos de composición
 
+<<<<<<< HEAD
 - **Backend:** `apps/api/cmd/server/main.go` carga la configuración (falla con código 2 y la lista completa de errores, sin imprimir secretos), construye la aplicación Fiber (`httpadapter.NewApp`), registra handlers y gestiona el apagado ordenado con `SIGINT`/`SIGTERM`. Hoy registra `GET /health/live` y `GET /health/ready`; `httpadapter.RegisterAPI` se ensambla cuando existan los casos de uso y el receptor de webhooks.
+=======
+- **Backend:** `apps/api/cmd/server/main.go` carga la configuración (falla con código 2 y la lista completa de errores, sin imprimir secretos), construye el pool de PostgreSQL (esperando a que la base responda), el store, la unidad de trabajo, el reloj, el adaptador de salas de LiveKit, los casos de uso del ciclo de vida y el worker periódico; registra los handlers y gestiona el apagado ordenado con `SIGINT`/`SIGTERM`. Hoy registra solo `GET /health/live`.
+>>>>>>> paso-seis-modelo-datos
 - **Frontend:** `apps/web/src/composition/bootstrap.ts` monta la aplicación Svelte. Ahí se ensamblarán gateways, adaptadores, casos de uso y presenters.
 
 ## Controles automáticos
@@ -59,9 +108,22 @@ Cada paquete Go de capa documenta su regla en `doc.go`; cada carpeta del fronten
 | Control | Estado |
 | --- | --- |
 | `go vet ./...` y `go test ./...` | Activos; se ejecutan también dentro de la build de `apps/api/Containerfile`. |
+<<<<<<< HEAD
 | `TestOpenAPIInSync` | Activo; falla si las rutas Fiber o los códigos de error difieren de `api/openapi.yaml`. |
+=======
+| Pruebas de integración de PostgreSQL | `go test -tags integration ./...`; requieren `TEST_DATABASE_URL` (o `DATABASE_URL`). Cada prueba crea un esquema aislado con la migración y lo borra al terminar. |
+>>>>>>> paso-seis-modelo-datos
 | `npm run check` (`svelte-check` + `tsc`) | Activo; se ejecuta dentro de la build de `apps/web/Containerfile`. |
 | Comprobación automática de imports por capa (Go y TS) | Pendiente, paso 12. Las reglas a aplicar son las listadas arriba. |
+
+## Decisiones del paso 6
+
+- **Estado y reglas en el dominio.** Las transiciones, el plazo de ingreso, la duración máxima y los permisos por rol viven en `internal/domain`; los casos de uso solo coordinan. El núcleo no importa nada de `application` ni de `adapters`.
+- **Bloqueo optimista con versión.** `calls.version` se incrementa en cada cambio de estado: dos procesos que compiten por la misma llamada no se pisan, el segundo recibe `ports.ErrCallStateConflict`.
+- **Outbox transaccional.** El trabajo de eliminar la sala se guarda en la misma transacción que el paso a `ENDING`. Si el proceso se reinicia, el trabajo sigue pendiente y se reintenta.
+- **Efecto externo fuera de la transacción.** La llamada al servidor de medios no puede deshacerse: se hace fuera de la transacción y solo se actualiza el estado persistido dentro de ella. El borrado de la sala es idempotente, así que un reintento no daña nada.
+- **Reconciliación sin adivinar.** Una llamada `ACTIVE` cuya sala no aparece se cuenta como huérfana y se registra, pero no cambia de estado: hasta que el paso 11 registre las conexiones de los participantes no hay forma de saber si la sala se recreó.
+- **Sin secretos ni medios en la base.** No se guardan tokens de medios ni contenidos de audio o video; solo metadatos y auditoría técnica.
 
 ## Decisiones del paso 4
 

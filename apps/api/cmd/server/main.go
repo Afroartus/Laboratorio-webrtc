@@ -15,9 +15,18 @@ import (
 	"syscall"
 	"time"
 
+<<<<<<< HEAD
 	"github.com/gofiber/fiber/v3"
+=======
+	"github.com/google/uuid"
+>>>>>>> paso-seis-modelo-datos
 
 	httpadapter "webrtc/api/internal/adapters/in/http"
+	"webrtc/api/internal/adapters/in/jobs"
+	"webrtc/api/internal/adapters/out/clock"
+	"webrtc/api/internal/adapters/out/livekit"
+	"webrtc/api/internal/adapters/out/postgres"
+	"webrtc/api/internal/application/usecases"
 )
 
 const shutdownTimeout = 10 * time.Second
@@ -48,6 +57,7 @@ func main() {
 }
 
 func run(ctx context.Context, cfg config, logger *slog.Logger) error {
+<<<<<<< HEAD
 	app := httpadapter.NewApp(logger)
 	// Las comprobaciones de PostgreSQL y LiveKit se añaden al ensamblar sus
 	// adaptadores de salida.
@@ -55,6 +65,75 @@ func run(ctx context.Context, cfg config, logger *slog.Logger) error {
 	// httpadapter.RegisterAPI se ensambla cuando existan los casos de uso que
 	// implementan ports.Auth, ports.Users y ports.Calls, y el receptor de
 	// webhooks (pasos 5, 6, 8 y 11).
+=======
+	// Base de datos: el servicio reintenta la conexión porque el arranque de
+	// los contenedores no garantiza que PostgreSQL esté listo.
+	pool, err := postgres.Open(ctx, cfg.DatabaseURL)
+	if err != nil {
+		return err
+	}
+	defer pool.Close()
+	if err := pool.WaitReady(ctx, cfg.DBConnectTimeout); err != nil {
+		return err
+	}
+
+	store := postgres.NewStore(pool)
+	unitOfWork := store.UnitOfWork()
+	sysClock := clock.New()
+	rooms := livekit.NewRoomService(cfg.LiveKitAPIURL.String(), cfg.LiveKitAPIKey, cfg.LiveKitAPISecret)
+
+	// Proceso periódico: reconciliación con el servidor de medios y
+	// ejecución de los trabajos pendientes del outbox.
+	reconcile := usecases.NewReconcileCalls(unitOfWork, sysClock, rooms, uuid.NewString)
+	processOutbox := usecases.NewProcessOutbox(unitOfWork, sysClock, rooms, cfg.OutboxMaxAttempts, uuid.NewString)
+
+	worker := jobs.NewWorker(cfg.WorkerInterval, []jobs.Task{
+		{
+			Name: "reconcile-calls",
+			Run: func(ctx context.Context) error {
+				result, err := reconcile.Execute(ctx)
+				if err != nil {
+					return err
+				}
+				if result.Cancelled > 0 || result.Ending > 0 || result.Ended > 0 || result.Orphans > 0 {
+					logger.Info("reconciliación de llamadas",
+						"canceladas", result.Cancelled,
+						"en_cierre", result.Ending,
+						"terminadas", result.Ended,
+						"sin_sala", result.Orphans)
+				}
+				return nil
+			},
+		},
+		{
+			Name: "process-outbox",
+			Run: func(ctx context.Context) error {
+				result, err := processOutbox.Execute(ctx)
+				if err != nil {
+					return err
+				}
+				if result.Completed > 0 || result.Failed > 0 || result.Abandoned > 0 {
+					logger.Info("trabajos pendientes",
+						"completados", result.Completed,
+						"fallidos", result.Failed,
+						"abandonados", result.Abandoned)
+				}
+				return nil
+			},
+		},
+	}, logger)
+	go worker.Run(ctx)
+
+	mux := http.NewServeMux()
+	httpadapter.RegisterHealth(mux)
+
+	srv := &http.Server{
+		Addr:              cfg.HTTPAddr,
+		Handler:           mux,
+		ReadHeaderTimeout: 5 * time.Second,
+		ErrorLog:          slog.NewLogLogger(logger.Handler(), slog.LevelError),
+	}
+>>>>>>> paso-seis-modelo-datos
 
 	serveErr := make(chan error, 1)
 	go func() {

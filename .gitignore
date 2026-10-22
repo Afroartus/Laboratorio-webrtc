@@ -394,6 +394,8 @@ infra/.env
 infra/*.env
 !infra/.env.example
 infra/secrets/
+# Copias de seguridad de la base de datos
+backup/
 # Certificados y claves locales exportados (p. ej. raíz de la CA de Caddy)
 *.pem
 *.key

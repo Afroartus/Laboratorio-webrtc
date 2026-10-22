@@ -1,6 +1,6 @@
 # Guía del laboratorio local
 
-Estado: paso 4. Construye y arranca `web`, `api`, `postgres` y `livekit`. Login, migraciones con contenido, usuarios de prueba y llamadas llegan en los pasos 5–9. La guía completa de entrega es el paso 13.
+Estado: paso 6. Construye y arranca `web`, `api`, `postgres` y `livekit`, aplica las migraciones del modelo de datos y ejecuta el proceso periódico del ciclo de vida. Login, usuarios de prueba, llamadas y entrega completa llegan en los pasos 5 y 7–13.
 
 ## Versiones fijadas
 
@@ -59,14 +59,79 @@ Los puertos se publican únicamente en `LAB_HOST_IP`: 8443/tcp (Caddy), 7881/tcp
 $env:PODMAN_COMPOSE_PROVIDER = "$env:APPDATA\Python\Python314\Scripts\podman-compose.exe"
 podman compose --env-file infra/.env -f infra/compose.yaml build
 podman compose --env-file infra/.env -f infra/compose.yaml up -d postgres
-# Tareas de una sola ejecución (perfil "tasks"). Las migraciones se crean en el paso 6:
-# podman compose --env-file infra/.env -f infra/compose.yaml run --rm migrate
+# Tarea de una sola ejecución (perfil "tasks"): aplica las migraciones.
+podman compose --env-file infra/.env -f infra/compose.yaml run --rm migrate
 podman compose --env-file infra/.env -f infra/compose.yaml up -d
 podman compose --env-file infra/.env -f infra/compose.yaml ps
 podman compose --env-file infra/.env -f infra/compose.yaml logs api livekit
 ```
 
 La build de la API ejecuta `go vet` y `go test`; la de la web, `svelte-check` y `tsc`. Si fallan, la imagen no se genera.
+
+## Migraciones (paso 6)
+
+Las migraciones viven en `apps/api/migrations/` y las aplica la imagen `migrate/migrate:v4.20.1` (perfil `tasks`). La primera migración crea el modelo de datos completo: `users`, `auth_sessions`, `calls`, `call_members`, `call_sessions`, `call_events` y `outbox_jobs`.
+
+```powershell
+# Aplicar las migraciones pendientes (tarea de una sola ejecución)
+podman compose --env-file infra/.env -f infra/compose.yaml run --rm migrate
+```
+
+Para consultar o revertir el estado se usa la misma imagen dentro de la red `backend`, donde `postgres` es el nombre del servicio:
+
+```powershell
+$env:PGPASSWORD = $env:POSTGRES_PASSWORD   # el valor de infra/.env
+$env:MIGRATE_URL = "postgres://webrtc:000000000000000000000000000000000000000000000000@postgres:5432/webrtc?sslmode=disable"
+
+# Versión aplicada
+podman run --rm --network webrtc-lab_backend -v ${PWD}/apps/api/migrations:/migrations:ro `
+  docker.io/migrate/migrate:v4.20.1 -path=/migrations -database $env:MIGRATE_URL version
+# Revertir la última migración aplicada (deja el esquema vacío)
+podman run --rm --network webrtc-lab_backend -v ${PWD}/apps/api/migrations:/migrations:ro `
+  docker.io/migrate/migrate:v4.20.1 -path=/migrations -database $env:MIGRATE_URL down 1
+```
+
+La API espera a que la base responda (`DB_CONNECT_TIMEOUT_SECONDS`, 30 s por defecto) y reintenta con backoff: se puede arrancar en paralelo con la migración sin romper el arranque.
+
+## Copias de seguridad y retención
+
+Los datos viven en el volumen `webrtc-lab_postgres_data`. La copia y la restauración se hacen con `pg_dump`/`pg_restore` desde un contenedor temporal de la misma imagen de PostgreSQL, con el directorio `./backup` montado para el archivo:
+
+```powershell
+New-Item -ItemType Directory -Force ./backup
+$env:PGPASSWORD = $env:POSTGRES_PASSWORD
+
+# Copia (formato custom, un solo archivo)
+podman run --rm --network webrtc-lab_backend -e PGPASSWORD=$env:PGPASSWORD -v ${PWD}/backup:/backup `
+  docker.io/library/postgres:18.6-alpine3.24 `
+  pg_dump -h postgres -U webrtc -d webrtc -Fc -f /backup/lab.dump
+
+# Restauración (borra y recrea los objetos del archivo)
+podman run --rm --network webrtc-lab_backend -e PGPASSWORD=$env:PGPASSWORD -v ${PWD}/backup:/backup:ro `
+  docker.io/library/postgres:18.6-alpine3.24 `
+  pg_restore -h postgres -U webrtc -d webrtc --clean --if-exists -Fc /backup/lab.dump
+```
+
+`./backup` queda fuera de git (las copias pueden contener datos de usuarios).
+
+La auditoría técnica (`call_events`) se conserva según `AUDIT_RETENTION_DAYS` (30 días por defecto). Es un valor de política, no una tarea automática: el borrado de eventos antiguos se hace con un `DELETE` explícito sobre `call_events` cuando se supera la retención, y nunca afecta a `calls` ni a `outbox_jobs`.
+
+## Pruebas de integración
+
+Las pruebas de integración de PostgreSQL llevan la etiqueta `integration` y necesitan una base reachable. Cada prueba crea un esquema aislado, aplica la migración inicial y lo borra al terminar, de modo que no tocan los datos del laboratorio.
+
+```powershell
+# Go local (Windows): la URL apunta al puerto publicado de PostgreSQL
+$env:TEST_DATABASE_URL = "postgres://webrtc:CONTRASEÑA@127.0.0.1:5432/webrtc?sslmode=disable"
+go test -tags integration ./...
+```
+
+En esta máquina los puertos publicados no llegan a Windows (ver el hallazgo del final), así que las pruebas de integración se ejecutan dentro de la red de Podman:
+
+```powershell
+podman run --rm --network webrtc-lab_backend -v ${PWD}/apps/api:/app -w /app `
+  docker.io/library/golang:1.26.3-alpine go test -tags integration ./...
+```
 
 ## CA local de Caddy
 
@@ -108,3 +173,18 @@ No es un defecto del Compose, pero bloquea los dos perfiles en este host. Se res
 1. `podman machine set --user-mode-networking=true` (reenvío por gvproxy); comprobar UDP y la publicación ligada a una IP concreta.
 2. Máquina en modo rootless.
 3. Ejecutar los mismos contenedores en un equipo/VM Linux de la LAN.
+
+## Verificación del paso 6
+
+Equipo Windows 11 Pro, Go 1.26.3 local.
+
+| Comprobación | Resultado |
+| --- | --- |
+| `go build ./...` y `go vet ./...` en `apps/api` | Correcto. |
+| `go test ./...` (dominio y casos de uso con dobles en memoria) | Correcto: transiciones, permisos, backoff, creación/cierre/activación de llamadas, reconciliación y outbox. |
+| `go vet -tags integration ./...` | Correcto: las pruebas de integración compilan. |
+| Migración `000001_init` aplicada y revertida sobre PostgreSQL | **Pendiente**: requiere Podman, que no está instalado en esta máquina. |
+| `go test -tags integration ./...` contra PostgreSQL | **Pendiente**: requiere Podman. |
+| `podman compose ... build api` con las migraciones montadas | **Pendiente**: requiere Podman. |
+
+La instalación de Podman 6.0.2 requiere elevación (instalador por usuario); hasta que se complete, la verificación del paso 6 se limita a Go local.

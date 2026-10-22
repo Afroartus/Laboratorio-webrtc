@@ -14,6 +14,20 @@ import (
 // minLiveKitSecretLength es la longitud mínima que LiveKit acepta para un secreto de API.
 const minLiveKitSecretLength = 32
 
+// Valores por defecto de las variables operativas del ciclo de vida.
+const (
+	// defaultJoinDeadlineSeconds es el plazo para unirse a una llamada vacía.
+	defaultJoinDeadlineSeconds = 600
+	// defaultWorkerIntervalSeconds es la frecuencia del proceso periódico.
+	defaultWorkerIntervalSeconds = 15
+	// defaultOutboxMaxAttempts es el número de intentos de un trabajo pendiente.
+	defaultOutboxMaxAttempts = 10
+	// defaultAuditRetentionDays es la retención de la auditoría técnica.
+	defaultAuditRetentionDays = 30
+	// defaultDBConnectTimeoutSeconds es la espera máxima por una base disponible.
+	defaultDBConnectTimeoutSeconds = 30
+)
+
 // config es el contrato de variables de entorno del servicio (paso 4 del spec).
 // Contiene secretos: no registrar la estructura completa en logs.
 type config struct {
@@ -29,6 +43,11 @@ type config struct {
 	AuthMode          string
 	CallMaxDuration   time.Duration
 	JoinTokenTTL      time.Duration
+	JoinDeadline      time.Duration
+	WorkerInterval    time.Duration
+	OutboxMaxAttempts int
+	AuditRetentionDay int
+	DBConnectTimeout  time.Duration
 }
 
 // loadConfig lee y valida la configuración. Devuelve todos los problemas
@@ -37,8 +56,6 @@ func loadConfig(getenv func(string) string) (config, error) {
 	var cfg config
 	var errs []error
 
-	
-	//correcion error eliminar comentario despues del mergue
 	required := func(name string) string {
 		v := strings.TrimSpace(getenv(name))
 		if v == "" {
@@ -46,9 +63,6 @@ func loadConfig(getenv func(string) string) (config, error) {
 		}
 		return v
 	}
-
-
-
 
 	parseURL := func(name string, schemes ...string) *url.URL {
 		raw := required(name)
@@ -73,6 +87,32 @@ func loadConfig(getenv func(string) string) (config, error) {
 			return 0
 		}
 		return time.Duration(n) * time.Second
+	}
+	// secondsWithDefault usa un valor por defecto si la variable no está
+	// definida. Solo se usa en variables operativas con valor razonable.
+	secondsWithDefault := func(name string, fallback int) time.Duration {
+		raw := strings.TrimSpace(getenv(name))
+		if raw == "" {
+			return time.Duration(fallback) * time.Second
+		}
+		n, err := strconv.Atoi(raw)
+		if err != nil || n <= 0 {
+			errs = append(errs, fmt.Errorf("%s debe ser un entero positivo de segundos", name))
+			return 0
+		}
+		return time.Duration(n) * time.Second
+	}
+	positiveIntWithDefault := func(name string, fallback int) int {
+		raw := strings.TrimSpace(getenv(name))
+		if raw == "" {
+			return fallback
+		}
+		n, err := strconv.Atoi(raw)
+		if err != nil || n <= 0 {
+			errs = append(errs, fmt.Errorf("%s debe ser un entero positivo", name))
+			return fallback
+		}
+		return n
 	}
 
 	cfg.HTTPAddr = strings.TrimSpace(getenv("HTTP_ADDR"))
@@ -125,6 +165,13 @@ func loadConfig(getenv func(string) string) (config, error) {
 
 	cfg.CallMaxDuration = positiveSeconds("CALL_MAX_DURATION_SECONDS")
 	cfg.JoinTokenTTL = positiveSeconds("JOIN_TOKEN_TTL_SECONDS")
+
+	// Variables del ciclo de vida de las llamadas (paso 6).
+	cfg.JoinDeadline = secondsWithDefault("JOIN_DEADLINE_SECONDS", defaultJoinDeadlineSeconds)
+	cfg.WorkerInterval = secondsWithDefault("WORKER_INTERVAL_SECONDS", defaultWorkerIntervalSeconds)
+	cfg.OutboxMaxAttempts = positiveIntWithDefault("OUTBOX_MAX_ATTEMPTS", defaultOutboxMaxAttempts)
+	cfg.AuditRetentionDay = positiveIntWithDefault("AUDIT_RETENTION_DAYS", defaultAuditRetentionDays)
+	cfg.DBConnectTimeout = secondsWithDefault("DB_CONNECT_TIMEOUT_SECONDS", defaultDBConnectTimeoutSeconds)
 
 	return cfg, errors.Join(errs...)
 }

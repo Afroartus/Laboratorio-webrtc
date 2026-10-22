@@ -5,7 +5,10 @@ import "errors"
 // Errores de aplicación. Los casos de uso los devuelven (o los envuelven con
 // fmt.Errorf("...: %w", ErrX)) y los adaptadores de entrada los traducen a su
 // protocolo. Ningún adaptador debe inspeccionar errores técnicos (SQL, SDK).
+<<<<<<< HEAD
 
+=======
+>>>>>>> paso-seis-modelo-datos
 var (
 	// ErrInvalidInput: datos con formato válido pero inaceptables (p. ej. un
 	// invitado inexistente o el propio creador).
@@ -32,6 +35,7 @@ var (
 	// está disponible.
 	ErrUnavailable = errors.New("dependencia no disponible")
 )
+<<<<<<< HEAD
 
 // const (
 // 	ErrInvalidInput        errorPort = "ErrInvalidInput"
@@ -59,3 +63,5 @@ var (
 // 		ErrTooManyAttempts:     errors.New("demasiados intentos"),
 // 		ErrUnavailable:         errors.New("dependencia no disponible"),
 // 	}
+=======
+>>>>>>> paso-seis-modelo-datos
