@@ -35,7 +35,7 @@ Parámetros iniciales: dos identidades por llamada, duración máxima de 60 minu
 | --- | --- | --- |
 | Frontend | Svelte + TypeScript + Vite | SPA con interfaz propia y compilación estática. |
 | SDK web | `livekit-client` | Señalización, pistas y eventos, encapsulados en un adaptador del frontend. |
-| Backend | Go + `net/http` | API, autenticación local y gestión de llamadas. |
+| Backend | Go + `fiber` | API, autenticación local y gestión de llamadas. |
 | SDK de servidor | SDK oficial LiveKit para Go y paquete de autenticación del protocolo | Gestión administrativa de salas y firma de tokens. |
 | Persistencia | PostgreSQL + `pgx/v5` | Usuarios locales, sesiones, llamadas y auditoría. |
 | Migraciones | SQL versionado con `golang-migrate` | Creación y actualización del esquema. |
